@@ -1,13 +1,14 @@
 using System;
 using System.Buffers.Binary;
+using System.Threading;
 using Tmds.Linux;
 using static Tmds.Linux.LibC;
 
 namespace EchoServer
 {
-    internal static class SingleThreadedEpollEchoServer
+    internal static class EpollEventLoop
     {
-        internal static unsafe void Run(int portNumber)
+        internal static unsafe void Run(int portNumber, bool executeOnEpollThread)
         {
             int socketFileDescriptor = socket(AF_INET, SOCK_STREAM, 0);
             if (socketFileDescriptor < 0)
@@ -71,15 +72,32 @@ namespace EchoServer
                             if (epoll_ctl(epollFileDescriptor, EPOLL_CTL_ADD, acceptResult, &epollAddSocketEvent) == -1)
                                 Environment.FailFast("Failed to add socket to epoll");
                         }
-                        else
+                        else if (executeOnEpollThread)
                         {
                             ssize_t bytesRead = recv(currentSocketFileDescriptor, pinnedMessageBuffer, MAX_MESSAGE_LENGTH, 0);
                             send(currentSocketFileDescriptor, pinnedMessageBuffer, (size_t)bytesRead, 0);
+                        }
+                        else
+                        {
+                            ThreadPool.UnsafeQueueUserWorkItem<int>(Copy, currentSocketFileDescriptor, false);
                         }
                     }
                 }
             }
         }
+
+        private static unsafe void Copy(int socketFileDescriptor)
+        {
+            fixed (byte* pinnedMessageBuffer = PerThreadBuffer)
+            {
+                ssize_t bytesRead = recv(socketFileDescriptor, pinnedMessageBuffer, MAX_MESSAGE_LENGTH, 0);
+                send(socketFileDescriptor, pinnedMessageBuffer, (size_t)bytesRead, 0);    
+            }
+        }
+
+        [ThreadStatic] private static byte[] _perThreadBuffer;
+        private static byte[] PerThreadBuffer => _perThreadBuffer ??= new byte[MAX_MESSAGE_LENGTH];
+        
 
         private static unsafe in_addr INADDR_ANY
         {
